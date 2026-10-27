@@ -2,11 +2,11 @@
 name: AI Viral Director - News Hunter
 
 on:
-  # Every 2 hours, at minute 17 (UTC)
+  # Every 2 hours at minute 17 (UTC)
   schedule:
     - cron: "17 */2 * * *"
 
-  # Allow manual testing from GitHub Actions
+  # Allow manual testing
   workflow_dispatch:
 
 permissions:
@@ -17,64 +17,117 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  collect-news:
-    name: Collect Latest News
+  collect-and-push:
+    name: Collect News and Push Telegram
     runs-on: ubuntu-latest
 
     timeout-minutes: 5
 
     steps:
+      # STEP 1: Prepare Node.js
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: "22"
 
-      - name: Run News Hunter
+      # STEP 2: Collect RSS news
+      - name: Collect Latest News
         env:
           NEWS_COLLECT_SECRET: ${{ secrets.NEWS_COLLECT_SECRET }}
-          NEWS_API_URL: https://aiviral1.vercel.app/api/news/collect
 
         run: |
           node --input-type=module <<'NODE'
           const secret = process.env.NEWS_COLLECT_SECRET;
-          const url = process.env.NEWS_API_URL;
 
-          if (!secret || !url) {
-            throw new Error("Missing News Hunter configuration");
+          if (!secret) {
+            throw new Error("Missing NEWS_COLLECT_SECRET");
           }
 
-          console.log("Starting AI Viral Director News Hunter");
+          console.log("Starting News Hunter collection");
 
-          const response = await fetch(url, {
-            method: "POST",
-            headers: {
-              Authorization: `Bearer ${secret}`,
-              Accept: "application/json"
-            },
-            signal: AbortSignal.timeout(90000)
-          });
+          const response = await fetch(
+            "https://aiviral1.vercel.app/api/news/collect",
+            {
+              method: "POST",
+              headers: {
+                Authorization: `Bearer ${secret}`,
+                Accept: "application/json"
+              },
+              signal: AbortSignal.timeout(90000)
+            }
+          );
 
           const body = await response.text();
-
           let result;
 
           try {
             result = JSON.parse(body);
           } catch {
             throw new Error(
-              `Invalid API response: HTTP ${response.status}`
+              `Invalid collection response: HTTP ${response.status}`
             );
           }
 
+          console.log("Scanned:", result.scanned ?? 0);
+          console.log("Newly saved:", result.saved ?? 0);
+
           if (!response.ok || result.ok !== true) {
-            console.error("News collection failed");
-            console.error("HTTP status:", response.status);
-            console.error("Errors:", result.errors ?? []);
-            throw new Error("News Hunter execution failed");
+            console.error("Collection errors:", result.errors ?? []);
+            throw new Error(
+              `News Hunter failed: HTTP ${response.status}`
+            );
           }
 
-          console.log("News Hunter completed successfully");
-          console.log("Articles scanned:", result.scanned);
-          console.log("New articles saved:", result.saved);
-          console.log("Errors:", result.errors ?? []);
+          console.log("News collection successful");
+          NODE
+
+      # STEP 3: Push pending news to Telegram
+      - name: Push News to Telegram
+        env:
+          NEWS_COLLECT_SECRET: ${{ secrets.NEWS_COLLECT_SECRET }}
+
+        run: |
+          node --input-type=module <<'NODE'
+          const secret = process.env.NEWS_COLLECT_SECRET;
+
+          if (!secret) {
+            throw new Error("Missing NEWS_COLLECT_SECRET");
+          }
+
+          console.log("Starting Telegram News Push");
+
+          const response = await fetch(
+            "https://aiviral1.vercel.app/api/news/push",
+            {
+              method: "POST",
+              headers: {
+                Authorization: `Bearer ${secret}`,
+                Accept: "application/json"
+              },
+              signal: AbortSignal.timeout(90000)
+            }
+          );
+
+          const body = await response.text();
+          let result;
+
+          try {
+            result = JSON.parse(body);
+          } catch {
+            throw new Error(
+              `Invalid Telegram push response: HTTP ${response.status}`
+            );
+          }
+
+          console.log("Articles sent:", result.sentArticles ?? 0);
+          console.log("Messages sent:", result.sentMessages ?? 0);
+
+          if (!response.ok || result.ok !== true) {
+            console.error("Push errors:", result.errors ?? []);
+            throw new Error(
+              `Telegram push failed: HTTP ${response.status}`
+            );
+          }
+
+          console.log("Telegram push successful");
           NODE
