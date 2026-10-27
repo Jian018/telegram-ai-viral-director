@@ -23,6 +23,8 @@ type IdRow = {
 };
 
 const MAX_PER_LANGUAGE = 3;
+const PENDING_MAX_AGE_HOURS = 24;
+
 
 async function databaseRows<T>(
   baseUrl: string,
@@ -136,6 +138,32 @@ export async function pushPendingNews() {
     );
   }
 
+  // Skip pending news collected over 24 hours ago.
+  const cutoff = new Date(
+    Date.now() - PENDING_MAX_AGE_HOURS * 60 * 60 * 1000
+  ).toISOString();
+
+  const expireQuery = new URLSearchParams({
+    select: "id",
+    telegram_push_status: "eq.pending",
+    language: "in.(en,zh)",
+    collected_at: `lt.${cutoff}`
+  });
+
+  const expiredRows = await databaseRows<IdRow>(
+    supabaseUrl,
+    supabaseKey,
+    expireQuery,
+    "PATCH",
+    {
+      telegram_push_status: "skipped"
+    }
+  );
+
+  console.log(
+    `[Telegram Notifier] Expired pending news: ${expiredRows.length}`
+  );
+
   let sentArticles = 0;
   let sentMessages = 0;
   const errors: string[] = [];
@@ -143,14 +171,16 @@ export async function pushPendingNews() {
   for (const language of ["en", "zh"] as const) {
     try {
       // 1. Get news not yet pushed to Telegram.
-      const findQuery = new URLSearchParams({
-        select:
-          "id,headline,source_name,source_url,published_at,collected_at",
-        telegram_push_status: "eq.pending",
-        language: `eq.${language}`,
-        order: "collected_at.desc",
-        limit: String(MAX_PER_LANGUAGE)
-      });
+     const findQuery = new URLSearchParams({
+  select:
+    "id,headline,source_name,source_url,published_at,collected_at",
+  telegram_push_status: "eq.pending",
+  language: `eq.${language}`,
+  collected_at: `gte.${cutoff}`,
+  order: "collected_at.desc",
+  limit: String(MAX_PER_LANGUAGE)
+});
+
 
       const candidates = await databaseRows<NewsItem>(
         supabaseUrl,
