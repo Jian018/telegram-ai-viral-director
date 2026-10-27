@@ -1,4 +1,5 @@
-import { Bot, InlineKeyboard } from "grammy";
+import { Bot, InlineKeyboard, type Context } from "grammy";
+
 
 const telegramToken = process.env.TELEGRAM_BOT_TOKEN;
 if (!telegramToken) {
@@ -57,7 +58,8 @@ bot.command("start", (ctx) =>
 );
 
 
-bot.command("today", async (ctx) => {
+
+async function sendTodayNews(ctx: Context) {
   const supabaseUrl = process.env.SUPABASE_URL?.trim();
   const supabaseKey = process.env.SUPABASE_SECRET_KEY?.trim();
 
@@ -145,7 +147,8 @@ bot.command("today", async (ctx) => {
       "❌ 读取最新新闻失败，请检查 Vercel Logs。"
     );
   }
-});
+}
+bot.command("today", sendTodayNews);
 
 bot.command("latest", (ctx) =>
   ctx.reply("🔄 最新新闻抓取：下一阶段开放；目前不会提供虚假热点。")
@@ -163,19 +166,38 @@ bot.command("settings", (ctx) =>
   ctx.reply("⚙️ 当前已启用私人管理员限制。详细设置下一阶段开放。")
 );
 
-bot.callbackQuery(/^menu:(today|ideas|prompts|review|history|settings)$/, async (ctx) => {
-  await ctx.answerCallbackQuery();
-  const names: Record<string, string> = {
-    today: "📰 今日热点：新闻抓取将在下一阶段开放。",
-    ideas: "💡 AI 创意：OpenAI 还未接入。",
-    prompts: "🎬 视频 Prompt：OpenAI 还未接入。",
-    review: "🔍 审核中心：AI Critic 还未接入。",
-    history: "🗂 历史记录：Supabase 还未接入。",
-    settings: "⚙️ 设置：当前为私人机器人，后续会增加更多配置。",
-  };
-  const action = ctx.callbackQuery.data.slice("menu:".length);
-  await ctx.reply(names[action] ?? "未知功能", { reply_markup: menu });
-});
+
+bot.callbackQuery(
+  /^menu:(today|ideas|prompts|review|history|settings)$/,
+  async (ctx) => {
+    await ctx.answerCallbackQuery();
+
+    const action = ctx.callbackQuery.data.slice(
+      "menu:".length
+    );
+
+    // 📰 Today News: read real news from Supabase
+    if (action === "today") {
+      await sendTodayNews(ctx);
+      return;
+    }
+
+    // Other menu functions remain unchanged
+    const names: Record<string, string> = {
+      ideas: "💡 AI 创意：OpenAI 还未接入。",
+      prompts: "🎬 视频 Prompt：OpenAI 还未接入。",
+      review: "🔍 审核中心：AI Critic 还未接入。",
+      history: "🗂 历史记录：Supabase 还未接入。",
+      settings: "⚙️ 设置：当前为私人机器人，后续会增加更多配置。"
+    };
+
+    await ctx.reply(
+      names[action] ?? "未知功能",
+      { reply_markup: menu }
+    );
+  }
+);
+
 
 
 bot.command("dbcheck", async (ctx) => {
