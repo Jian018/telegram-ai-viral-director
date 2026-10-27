@@ -1,6 +1,5 @@
 import { Bot, InlineKeyboard, type Context } from "grammy";
 
-
 const telegramToken = process.env.TELEGRAM_BOT_TOKEN;
 if (!telegramToken) {
   throw new Error("TELEGRAM_BOT_TOKEN must be set on the server");
@@ -148,15 +147,45 @@ async function sendTodayNews(ctx: Context) {
     );
   }
 }
+
 bot.command("today", sendTodayNews);
 
 /**
- * AI Viral Director
  * Telegram Push Review Center
- *
- * Read-only: displays news requiring
- * manual Telegram delivery verification.
+ * The administrator can inspect news awaiting manual confirmation.
+ * Each item has its own buttons; changes are made by a protected Supabase RPC.
  */
+
+type ReviewNews = {
+  id: string;
+  headline: string;
+  language: string;
+  source_name: string;
+  source_url: string;
+  telegram_push_claimed_at: string | null;
+  telegram_review_flagged_at: string | null;
+  telegram_review_reason: string | null;
+};
+
+function reviewButtons(newsId: string): InlineKeyboard {
+  return new InlineKeyboard()
+    .text("✅ 确认已收到", `review:choose:received:${newsId}`)
+    .text("❓ 无法确认", `review:choose:unconfirmed:${newsId}`);
+}
+
+function formatReviewDate(value: string | null): string {
+  if (!value) return "未记录";
+
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "时间格式异常";
+
+  return (
+    date.toLocaleString("zh-SG", {
+      timeZone: "Asia/Singapore",
+      hour12: false
+    }) + " SGT"
+  );
+}
 
 async function sendReviewQueue(ctx: Context) {
   const supabaseUrl = process.env.SUPABASE_URL?.trim();
@@ -170,7 +199,7 @@ async function sendReviewQueue(ctx: Context) {
   try {
     const query = new URLSearchParams({
       select:
-        "headline,language,source_name,source_url," +
+        "id,headline,language,source_name,source_url," +
         "telegram_push_claimed_at," +
         "telegram_review_flagged_at," +
         "telegram_review_reason",
@@ -179,115 +208,77 @@ async function sendReviewQueue(ctx: Context) {
       limit: "5"
     });
 
-    const endpoint =
-      `${supabaseUrl.replace(/\/+$/, "")}` +
-      `/rest/v1/news_items?${query.toString()}`;
-
-    const response = await fetch(endpoint, {
-      method: "GET",
-      headers: {
-        apikey: supabaseKey,
-        Accept: "application/json"
-      },
-      signal: AbortSignal.timeout(10000)
-    });
+    const response = await fetch(
+      `${supabaseUrl.replace(/\/+$/, "")}/rest/v1/news_items?${query.toString()}`,
+      {
+        method: "GET",
+        headers: {
+          apikey: supabaseKey,
+          Accept: "application/json"
+        },
+        signal: AbortSignal.timeout(10000)
+      }
+    );
 
     if (!response.ok) {
-      throw new Error(
-        `Supabase Review HTTP ${response.status}`
-      );
+      throw new Error(`Supabase Review HTTP ${response.status}`);
     }
 
-    type ReviewNews = {
-      headline: string;
-      language: string;
-      source_name: string;
-      source_url: string;
-      telegram_push_claimed_at: string | null;
-      telegram_review_flagged_at: string | null;
-      telegram_review_reason: string | null;
-    };
-
-    const articles: unknown = await response.json();
-
-    if (!Array.isArray(articles)) {
+    const data: unknown = await response.json();
+    if (!Array.isArray(data)) {
       throw new Error("Unexpected review response");
     }
 
-    const news = articles as ReviewNews[];
-
-    // No news currently requires manual review.
-    if (news.length === 0) {
+    const articles = data as ReviewNews[];
+    if (articles.length === 0) {
       await ctx.reply(
         "🔍 AI Viral Director — 推送异常审核中心\n\n" +
-        "✅ 当前没有需要人工核查的推送异常。\n\n" +
-        "系统会继续检查超时的 sending 记录。\n\n" +
-        "注意：这里检查的是 Telegram 推送异常，" +
-        "不是新闻真实性审核。"
+          "✅ 当前没有需要人工核查的推送异常。\n\n" +
+          "这里只检查 Telegram 推送异常，不是新闻真实性审核。"
       );
       return;
     }
 
-    const formatDate = (value: string | null): string => {
-      if (!value) return "未记录";
+    await ctx.reply(
+      "🔍 AI Viral Director — 推送异常审核中心\n\n" +
+        `找到 ${articles.length} 条待核查记录。\n\n` +
+        "请先核对 Telegram 是否收到对应新闻，再点击按钮。"
+    );
 
-      const date = new Date(value);
-
-      if (Number.isNaN(date.getTime())) {
-        return "时间格式异常";
-      }
-
-      return date.toLocaleString("zh-SG", {
-        timeZone: "Asia/Singapore",
-        hour12: false
-      }) + " SGT";
-    };
-
-    const blocks = news.map((item, index) => {
+    for (const article of articles) {
       const platform =
-        item.language === "en"
-          ? "🌍 Instagram"
-          : "🇨🇳 Douyin";
+        article.language === "en" ? "🌍 Instagram" : "🇨🇳 Douyin";
 
       const link =
-        item.source_url.length <= 250
-          ? item.source_url
+        article.source_url.length <= 300
+          ? article.source_url
           : "链接较长，请在 Supabase 查看";
 
-      return [
-        `${index + 1}. ${item.headline.slice(0, 160)}`,
+      const message = [
+        "🔍 推送异常待审核",
+        "",
+        `📰 ${article.headline.slice(0, 180)}`,
         `📱 平台：${platform}`,
-        `📡 来源：${item.source_name.slice(0, 60)}`,
-        `🕒 领取：${formatDate(item.telegram_push_claimed_at)}`,
-        `⚠️ 标记：${formatDate(item.telegram_review_flagged_at)}`,
-        `📝 原因：${(item.telegram_review_reason ?? "发送结果未确认").slice(0, 150)}`,
-        `🔗 ${link}`
+        `📡 来源：${article.source_name.slice(0, 80)}`,
+        `🕒 领取：${formatReviewDate(article.telegram_push_claimed_at)}`,
+        `⚠️ 标记：${formatReviewDate(article.telegram_review_flagged_at)}`,
+        `📝 原因：${(article.telegram_review_reason ?? "发送结果未确认").slice(0, 180)}`,
+        `🔗 ${link}`,
+        "",
+        "请核对 Telegram 收件记录，再选择操作。"
       ].join("\n");
-    });
 
-    const message =
-      "🔍 AI Viral Director — 推送异常审核中心\n\n" +
-      `最近 ${news.length} 条待核查记录：\n\n` +
-      blocks.join("\n\n") +
-      "\n\n⚠️ 请先检查 Telegram 是否实际收到消息。" +
-      "\n不要直接重发，也不要删除永久配额记录。";
-
-    await ctx.reply(message, {
-      link_preview_options: {
-        is_disabled: true
-      }
-    });
-
+      await ctx.reply(message, {
+        reply_markup: reviewButtons(article.id),
+        link_preview_options: { is_disabled: true }
+      });
+    }
   } catch (error) {
     console.error("[Review Center] Error:", error);
-
-    await ctx.reply(
-      "❌ 读取审核中心失败，请检查 Vercel Logs。"
-    );
+    await ctx.reply("❌ 审核中心读取失败，请检查 Vercel Logs。");
   }
 }
 
-// Allow manual review using /review.
 bot.command("review", sendReviewQueue);
 
 bot.command("latest", (ctx) =>
@@ -345,6 +336,148 @@ bot.callbackQuery(
 );
 
 
+
+/**
+ * Telegram manual review actions, with a two-tap confirmation.
+ * The admin-only middleware above also protects these callbacks.
+ * A successful database operation writes telegram_push_review_audit.
+ */
+const reviewActionPattern =
+  /^review:(choose|apply|cancel):(received|unconfirmed):([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i;
+
+bot.callbackQuery(reviewActionPattern, async (ctx) => {
+  const adminId = process.env.TELEGRAM_ADMIN_USER_ID?.trim();
+
+  // Require the same private administrator as the main bot.
+  if (
+    !adminId ||
+    ctx.chat?.type !== "private" ||
+    String(ctx.from?.id) !== adminId
+  ) {
+    await ctx.answerCallbackQuery({
+      text: "没有操作权限",
+      show_alert: true
+    });
+    return;
+  }
+
+  const match = ctx.callbackQuery.data.match(reviewActionPattern);
+  if (!match) {
+    await ctx.answerCallbackQuery({ text: "无效的审核操作" });
+    return;
+  }
+
+  const [, stage, action, newsId] = match;
+
+  if (stage === "choose") {
+    await ctx.answerCallbackQuery({ text: "请再次确认操作" });
+
+    const label =
+      action === "received" ? "✅ 最终确认已收到" : "❓ 确认无法确认";
+
+    const keyboard = new InlineKeyboard()
+      .text(label, `review:apply:${action}:${newsId}`)
+      .text("↩️ 取消", `review:cancel:${action}:${newsId}`);
+
+    await ctx.editMessageReplyMarkup({ reply_markup: keyboard });
+    return;
+  }
+
+  if (stage === "cancel") {
+    await ctx.answerCallbackQuery({ text: "已取消" });
+    await ctx.editMessageReplyMarkup({
+      reply_markup: reviewButtons(newsId)
+    });
+    return;
+  }
+
+  // Applying a decision may update Supabase. Acknowledge the tap first.
+  await ctx.answerCallbackQuery({ text: "正在保存人工审核结果" });
+
+  const supabaseUrl = process.env.SUPABASE_URL?.trim();
+  const supabaseKey = process.env.SUPABASE_SECRET_KEY?.trim();
+
+  if (!supabaseUrl || !supabaseKey) {
+    await ctx.reply("❌ Supabase 环境变量缺失，审核未执行。");
+    return;
+  }
+
+  const decision =
+    action === "received" ? "confirmed_received" : "unconfirmed";
+
+  try {
+    const response = await fetch(
+      `${supabaseUrl.replace(/\/+$/, "")}/rest/v1/rpc/resolve_telegram_push_review`,
+      {
+        method: "POST",
+        headers: {
+          apikey: supabaseKey,
+          Accept: "application/json",
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          p_news_id: newsId,
+          p_decision: decision,
+          p_reviewer_telegram_id: String(ctx.from.id)
+        }),
+        signal: AbortSignal.timeout(10000)
+      }
+    );
+
+    if (!response.ok) {
+      console.error("[Review Action] RPC failed:", response.status);
+      await ctx.reply(
+        "⚠️ 审核未能确认完成。\n" +
+          `HTTP Status: ${response.status}\n` +
+          "请先发送 /review 刷新，勿连续重复点击。"
+      );
+      return;
+    }
+
+    const result: unknown = await response.json();
+    if (
+      !result ||
+      typeof result !== "object" ||
+      !("success" in result) ||
+      result.success !== true
+    ) {
+      throw new Error("Unexpected review RPC result");
+    }
+
+    // Clear buttons only after the database confirmed the decision.
+    try {
+      await ctx.editMessageReplyMarkup({
+        reply_markup: new InlineKeyboard()
+      });
+    } catch (editError) {
+      console.error("[Review Action] Button removal failed:", editError);
+    }
+
+    if (decision === "confirmed_received") {
+      await ctx.reply(
+        "✅ 人工审核完成！\n\n" +
+          "确认：Telegram 已收到该新闻。\n" +
+          "状态：needs_review → sent\n" +
+          "审核日志已保存。\n\n" +
+          "原始发送时间和永久配额保持不变。"
+      );
+    } else {
+      await ctx.reply(
+        "📝 审核记录已保存。\n\n" +
+          "结果：无法确认 Telegram 是否收到。\n" +
+          "状态：仍为 needs_review。\n" +
+          "系统不会自动重发或释放配额。"
+      );
+    }
+  } catch (error) {
+    console.error("[Review Action] Error:", error);
+    await ctx.reply(
+      "❌ 审核操作出现错误，结果可能尚未确认。\n" +
+        "请先检查 Supabase 审核记录并发送 /review 刷新，" +
+        "不要连续重复点击。"
+    );
+  }
+});
 
 bot.command("dbcheck", async (ctx) => {
   const supabaseUrl = process.env.SUPABASE_URL?.trim();
