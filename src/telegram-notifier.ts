@@ -309,6 +309,54 @@ export async function pushPendingNews() {
     );
   }
 
+
+  // STEP 0: Check stale Telegram sending records.
+  // Flag uncertain deliveries for manual review.
+  // Never retry or release permanent quota here.
+
+  console.log(
+    "[Telegram Safety] Checking stale sending records"
+  );
+
+  const reviewResponse = await fetch(
+    `${supabaseUrl}/rest/v1/rpc/flag_stale_telegram_sending`,
+    {
+      method: "POST",
+      headers: {
+        apikey: supabaseKey,
+        Accept: "application/json",
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({}),
+      signal: AbortSignal.timeout(10000)
+    }
+  );
+
+  if (!reviewResponse.ok) {
+    throw new Error(
+      `Telegram review RPC failed: HTTP ${reviewResponse.status}`
+    );
+  }
+
+  const reviewResult: unknown =
+    await reviewResponse.json();
+
+  if (
+    typeof reviewResult !== "number" ||
+    !Number.isInteger(reviewResult) ||
+    reviewResult < 0
+  ) {
+    throw new Error(
+      "Unexpected Telegram review RPC result"
+    );
+  }
+
+  console.log(
+    `[Telegram Safety] Newly flagged for review: ${reviewResult}`
+  );
+
+
+  
   // STEP 1: Expire old pending news.
   const cutoff = new Date(
     Date.now() -
