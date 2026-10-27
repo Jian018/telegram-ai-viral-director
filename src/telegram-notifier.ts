@@ -1,17 +1,16 @@
 
 /**
  * AI Viral Director
- * Telegram News Notifier - Daily Quota Version
+ * Telegram Notifier - Midnight Safety Version
  *
- * Daily quota (Singapore time):
- * - English: 9 articles
- * - Chinese: 9 articles
+ * Daily quota:
+ * EN: 9 articles
+ * ZH: 9 articles
  *
- * Maximum per run:
- * - English: 3 articles
- * - Chinese: 3 articles
+ * Singapore midnight protection:
+ * Pause between 23:45 and 00:15 SGT.
  *
- * News claims are controlled by Supabase RPC.
+ * The database permanently reserves quota.
  */
 
 type Language = "en" | "zh";
@@ -32,9 +31,74 @@ type IdRow = {
 const MAX_PER_LANGUAGE = 3;
 const PENDING_MAX_AGE_HOURS = 24;
 
+const SGT_OFFSET_MS = 8 * 60 * 60 * 1000;
+
+type SendGate = {
+  allowed: boolean;
+  day: string;
+  time: string;
+  reason: string;
+};
+
 /**
- * Update news rows in Supabase.
- * Used for expiration and confirming delivery.
+ * Safely calculate Singapore date and time.
+ * Singapore observes UTC+8 year-round.
+ *
+ * Optional Date input also allows future
+ * deterministic unit testing.
+ */
+function checkSendGate(
+  at: Date = new Date(),
+  expectedDay?: string
+): SendGate {
+
+  const shifted = new Date(
+    at.getTime() + SGT_OFFSET_MS
+  );
+
+  const iso = shifted.toISOString();
+
+  const day = iso.slice(0, 10);
+  const time = iso.slice(11, 16);
+
+  const minutes =
+    shifted.getUTCHours() * 60 +
+    shifted.getUTCMinutes();
+
+  // Block 23:45 until 00:15 Singapore time.
+  const inQuietWindow =
+    minutes >= 23 * 60 + 45 ||
+    minutes < 15;
+
+  if (inQuietWindow) {
+    return {
+      allowed: false,
+      day,
+      time,
+      reason: "Singapore midnight safety window"
+    };
+  }
+
+  // Block claims that crossed to another day.
+  if (expectedDay && day !== expectedDay) {
+    return {
+      allowed: false,
+      day,
+      time,
+      reason: "Singapore date changed before sending"
+    };
+  }
+
+  return {
+    allowed: true,
+    day,
+    time,
+    reason: "Safe to send"
+  };
+}
+
+/**
+ * Update selected Supabase news records.
  */
 async function patchNews<T>(
   baseUrl: string,
@@ -42,6 +106,7 @@ async function patchNews<T>(
   query: URLSearchParams,
   payload: Record<string, unknown>
 ): Promise<T[]> {
+
   const response = await fetch(
     `${baseUrl}/rest/v1/news_items?${query.toString()}`,
     {
@@ -63,24 +128,24 @@ async function patchNews<T>(
     );
   }
 
-  const data: unknown = await response.json();
+  const result: unknown = await response.json();
 
-  if (!Array.isArray(data)) {
-    throw new Error("Unexpected Supabase PATCH response");
+  if (!Array.isArray(result)) {
+    throw new Error("Unexpected PATCH response");
   }
 
-  return data as T[];
+  return result as T[];
 }
 
 /**
- * Atomically claim news using the Supabase
- * daily quota database function.
+ * Claim news using permanent daily quota RPC.
  */
 async function claimNews(
   baseUrl: string,
   apiKey: string,
   language: Language
 ): Promise<NewsItem[]> {
+
   const response = await fetch(
     `${baseUrl}/rest/v1/rpc/claim_telegram_news`,
     {
@@ -99,71 +164,109 @@ async function claimNews(
   );
 
   if (!response.ok) {
-    let errorCode = "";
-
-    try {
-      const errorData = await response.json() as {
-        code?: string;
-      };
-
-      errorCode = errorData.code ?? "";
-    } catch {
-      // No structured error body.
-    }
-
     throw new Error(
-      `Supabase RPC HTTP ${response.status}` +
-      (errorCode ? ` (${errorCode})` : "")
+      `Supabase RPC HTTP ${response.status}`
     );
   }
 
-  const data: unknown = await response.json();
+  const result: unknown = await response.json();
 
-  if (!Array.isArray(data)) {
+  if (!Array.isArray(result)) {
     throw new Error("Unexpected RPC response");
   }
 
-  return data as NewsItem[];
+  return result as NewsItem[];
 }
 
 /**
- * Format a compact Telegram summary.
+ * Safely skip claimed news that must not be sent.
+ *
+ * Important:
+ * The permanent quota reservation is retained.
+ * Skipped news will not be automatically reclaimed.
+ */
+async function skipClaimedNews(
+  baseUrl: string,
+  apiKey: string,
+  articles: NewsItem[]
+): Promise<void> {
+
+  if (articles.length === 0) return;
+
+  const ids = articles.map(
+    (article) => article.id
+  );
+
+  const query = new URLSearchParams({
+    id: `in.(${ids.join(",")})`,
+    telegram_push_status: "eq.sending",
+    select: "id"
+  });
+
+  const updated = await patchNews<IdRow>(
+    baseUrl,
+    apiKey,
+    query,
+    {
+      telegram_push_status: "skipped"
+    }
+  );
+
+  if (updated.length !== articles.length) {
+    throw new Error(
+      "Safety skip incomplete. Manual review required."
+    );
+  }
+
+  console.warn(
+    `[Telegram Safety] Skipped ${updated.length} unsent articles`
+  );
+}
+
+/**
+ * Format English/Chinese Telegram summary.
  */
 function formatNews(
   articles: NewsItem[],
   language: Language
 ): string {
+
   const heading =
     language === "en"
       ? "🌍 Instagram — 新英文科技新闻"
       : "🇨🇳 Douyin — 新中文科技新闻";
 
-  const blocks = articles.map((article, index) => {
-    const date = article.published_at
-      ? new Date(article.published_at).toLocaleString(
-          "zh-SG",
-          {
+  const blocks = articles.map(
+    (article, index) => {
+
+      const date = article.published_at
+        ? new Date(
+            article.published_at
+          ).toLocaleString("zh-SG", {
             timeZone: "Asia/Singapore",
             hour12: false
-          }
-        )
-      : "未知";
+          })
+        : "未知";
 
-    const headline = article.headline.slice(0, 160);
-    const source = article.source_name.slice(0, 80);
+      const headline =
+        article.headline.slice(0, 160);
 
-    const link =
-      article.source_url.length <= 500
-        ? article.source_url
-        : "链接较长，请使用 /today 查看";
+      const source =
+        article.source_name.slice(0, 80);
 
-    return [
-      `${index + 1}. ${headline}`,
-      `📡 来源：${source}`,
-      `🕒 发布时间：${date} SGT`,
-      `🔗 ${link}`
-    ].join("\n");
-  });
+      const link =
+        article.source_url.length <= 500
+          ? article.source_url
+          : "链接较长，请使用 /today 查看";
+
+      return [
+        `${index + 1}. ${headline}`,
+        `📡 来源：${source}`,
+        `🕒 发布时间：${date} SGT`,
+        `🔗 ${link}`
+      ].join("\n");
+    }
+  );
 
   return [
     heading,
@@ -177,9 +280,10 @@ function formatNews(
 }
 
 /**
- * Main Telegram notification function.
+ * Main Telegram push function.
  */
 export async function pushPendingNews() {
+
   const supabaseUrl =
     process.env.SUPABASE_URL
       ?.trim()
@@ -205,7 +309,7 @@ export async function pushPendingNews() {
     );
   }
 
-  // STEP 1: Expire pending news older than 24 hours.
+  // STEP 1: Expire old pending news.
   const cutoff = new Date(
     Date.now() -
     PENDING_MAX_AGE_HOURS * 60 * 60 * 1000
@@ -233,13 +337,29 @@ export async function pushPendingNews() {
 
   let sentArticles = 0;
   let sentMessages = 0;
+  let safetySkipped = 0;
+
   const errors: string[] = [];
 
-  // STEP 2: Process each language separately.
+  // STEP 2: Process English and Chinese news.
   for (const language of ["en", "zh"] as const) {
+
     try {
-      // STEP 3: Claim through daily quota RPC.
-      // The database controls daily quota and locking.
+
+      // STEP 3: First safety check.
+      const beforeClaim = checkSendGate();
+
+      if (!beforeClaim.allowed) {
+        console.log(
+          `[Telegram Safety] ${language}: ` +
+          `Paused at ${beforeClaim.day} ` +
+          `${beforeClaim.time} SGT`
+        );
+
+        continue;
+      }
+
+      // STEP 4: Claim through permanent quota RPC.
       const claimedArticles = await claimNews(
         supabaseUrl,
         supabaseKey,
@@ -249,24 +369,44 @@ export async function pushPendingNews() {
       if (claimedArticles.length === 0) {
         console.log(
           `[Telegram Notifier] ${language}: ` +
-          "No claimable news or daily quota reached"
+          "No pending news or quota reached"
         );
 
         continue;
       }
 
-      console.log(
-        `[Telegram Notifier] ${language}: ` +
-        `${claimedArticles.length} articles claimed`
-      );
-
-      // STEP 4: Prepare Telegram message.
+      // STEP 5: Prepare the message.
       const message = formatNews(
         claimedArticles,
         language
       );
 
-      // STEP 5: Send notification.
+      // STEP 6: Check AGAIN immediately before sending.
+      const beforeSend = checkSendGate(
+        new Date(),
+        beforeClaim.day
+      );
+
+      if (!beforeSend.allowed) {
+        console.warn(
+          `[Telegram Safety] ${language}: ` +
+          beforeSend.reason
+        );
+
+        // Telegram has NOT been called yet.
+        // Mark this batch as skipped conservatively.
+        await skipClaimedNews(
+          supabaseUrl,
+          supabaseKey,
+          claimedArticles
+        );
+
+        safetySkipped += claimedArticles.length;
+
+        continue;
+      }
+
+      // STEP 7: Send to Telegram.
       const telegramResponse = await fetch(
         `https://api.telegram.org/bot${telegramToken}/sendMessage`,
         {
@@ -301,7 +441,7 @@ export async function pushPendingNews() {
         );
       }
 
-      // STEP 6: Record successful Telegram delivery.
+      // STEP 8: Confirm successful delivery.
       const ids = claimedArticles.map(
         (article) => article.id
       );
@@ -324,7 +464,7 @@ export async function pushPendingNews() {
 
       if (updatedRows.length !== claimedArticles.length) {
         throw new Error(
-          "Telegram delivered but database confirmation incomplete"
+          "Telegram delivered, database confirmation incomplete"
         );
       }
 
@@ -337,6 +477,7 @@ export async function pushPendingNews() {
       );
 
     } catch (error) {
+
       const message =
         error instanceof Error
           ? error.message
@@ -350,11 +491,12 @@ export async function pushPendingNews() {
     }
   }
 
-  // STEP 7: Return results to the API.
+  // STEP 9: Return results.
   return {
     success: errors.length === 0,
     sentArticles,
     sentMessages,
+    safetySkipped,
     errors
   };
 }
