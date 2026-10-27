@@ -59,7 +59,7 @@ export async function POST(
           "Content-Type": "application/json"
         },
         body: JSON.stringify({
-          model: "gpt-4.1-nano",
+          model: "gpt-4o-mini",
           input: "Reply with exactly OK.",
           max_output_tokens: 16,
           store: false
