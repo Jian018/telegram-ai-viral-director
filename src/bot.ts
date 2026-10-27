@@ -150,6 +150,146 @@ async function sendTodayNews(ctx: Context) {
 }
 bot.command("today", sendTodayNews);
 
+/**
+ * AI Viral Director
+ * Telegram Push Review Center
+ *
+ * Read-only: displays news requiring
+ * manual Telegram delivery verification.
+ */
+
+async function sendReviewQueue(ctx: Context) {
+  const supabaseUrl = process.env.SUPABASE_URL?.trim();
+  const supabaseKey = process.env.SUPABASE_SECRET_KEY?.trim();
+
+  if (!supabaseUrl || !supabaseKey) {
+    await ctx.reply("❌ Supabase 尚未配置。");
+    return;
+  }
+
+  try {
+    const query = new URLSearchParams({
+      select:
+        "headline,language,source_name,source_url," +
+        "telegram_push_claimed_at," +
+        "telegram_review_flagged_at," +
+        "telegram_review_reason",
+      telegram_push_status: "eq.needs_review",
+      order: "telegram_review_flagged_at.desc.nullslast",
+      limit: "5"
+    });
+
+    const endpoint =
+      `${supabaseUrl.replace(/\/+$/, "")}` +
+      `/rest/v1/news_items?${query.toString()}`;
+
+    const response = await fetch(endpoint, {
+      method: "GET",
+      headers: {
+        apikey: supabaseKey,
+        Accept: "application/json"
+      },
+      signal: AbortSignal.timeout(10000)
+    });
+
+    if (!response.ok) {
+      throw new Error(
+        `Supabase Review HTTP ${response.status}`
+      );
+    }
+
+    type ReviewNews = {
+      headline: string;
+      language: string;
+      source_name: string;
+      source_url: string;
+      telegram_push_claimed_at: string | null;
+      telegram_review_flagged_at: string | null;
+      telegram_review_reason: string | null;
+    };
+
+    const articles: unknown = await response.json();
+
+    if (!Array.isArray(articles)) {
+      throw new Error("Unexpected review response");
+    }
+
+    const news = articles as ReviewNews[];
+
+    // No news currently requires manual review.
+    if (news.length === 0) {
+      await ctx.reply(
+        "🔍 AI Viral Director — 推送异常审核中心\n\n" +
+        "✅ 当前没有需要人工核查的推送异常。\n\n" +
+        "系统会继续检查超时的 sending 记录。\n\n" +
+        "注意：这里检查的是 Telegram 推送异常，" +
+        "不是新闻真实性审核。"
+      );
+      return;
+    }
+
+    const formatDate = (value: string | null): string => {
+      if (!value) return "未记录";
+
+      const date = new Date(value);
+
+      if (Number.isNaN(date.getTime())) {
+        return "时间格式异常";
+      }
+
+      return date.toLocaleString("zh-SG", {
+        timeZone: "Asia/Singapore",
+        hour12: false
+      }) + " SGT";
+    };
+
+    const blocks = news.map((item, index) => {
+      const platform =
+        item.language === "en"
+          ? "🌍 Instagram"
+          : "🇨🇳 Douyin";
+
+      const link =
+        item.source_url.length <= 250
+          ? item.source_url
+          : "链接较长，请在 Supabase 查看";
+
+      return [
+        `${index + 1}. ${item.headline.slice(0, 160)}`,
+        `📱 平台：${platform}`,
+        `📡 来源：${item.source_name.slice(0, 60)}`,
+        `🕒 领取：${formatDate(item.telegram_push_claimed_at)}`,
+        `⚠️ 标记：${formatDate(item.telegram_review_flagged_at)}`,
+        `📝 原因：${(item.telegram_review_reason ?? "发送结果未确认").slice(0, 150)}`,
+        `🔗 ${link}`
+      ].join("\n");
+    });
+
+    const message =
+      "🔍 AI Viral Director — 推送异常审核中心\n\n" +
+      `最近 ${news.length} 条待核查记录：\n\n` +
+      blocks.join("\n\n") +
+      "\n\n⚠️ 请先检查 Telegram 是否实际收到消息。" +
+      "\n不要直接重发，也不要删除永久配额记录。";
+
+    await ctx.reply(message, {
+      link_preview_options: {
+        is_disabled: true
+      }
+    });
+
+  } catch (error) {
+    console.error("[Review Center] Error:", error);
+
+    await ctx.reply(
+      "❌ 读取审核中心失败，请检查 Vercel Logs。"
+    );
+  }
+}
+
+// Allow manual review using /review.
+bot.command("review", sendReviewQueue);
+
 bot.command("latest", (ctx) =>
   ctx.reply("🔄 最新新闻抓取：下一阶段开放；目前不会提供虚假热点。")
 );
@@ -182,6 +322,12 @@ bot.callbackQuery(
       return;
     }
 
+    if (action === "review") {
+      await sendReviewQueue(ctx);
+      return;
+    }
+
+    
     // Other menu functions remain unchanged
     const names: Record<string, string> = {
       ideas: "💡 AI 创意：OpenAI 还未接入。",
