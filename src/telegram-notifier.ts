@@ -1,10 +1,17 @@
 
 /**
  * AI Viral Director
- * Telegram News Notifier - Phase 1
+ * Telegram News Notifier - Daily Quota Version
  *
- * Sends new, pending news to the private admin.
- * Maximum 3 English + 3 Chinese news per run.
+ * Daily quota (Singapore time):
+ * - English: 9 articles
+ * - Chinese: 9 articles
+ *
+ * Maximum per run:
+ * - English: 3 articles
+ * - Chinese: 3 articles
+ *
+ * News claims are controlled by Supabase RPC.
  */
 
 type Language = "en" | "zh";
@@ -25,49 +32,103 @@ type IdRow = {
 const MAX_PER_LANGUAGE = 3;
 const PENDING_MAX_AGE_HOURS = 24;
 
-
-async function databaseRows<T>(
+/**
+ * Update news rows in Supabase.
+ * Used for expiration and confirming delivery.
+ */
+async function patchNews<T>(
   baseUrl: string,
   apiKey: string,
   query: URLSearchParams,
-  method: "GET" | "PATCH" = "GET",
-  payload?: Record<string, unknown>
+  payload: Record<string, unknown>
 ): Promise<T[]> {
-  const headers: Record<string, string> = {
-    apikey: apiKey,
-    Accept: "application/json"
-  };
-
-  if (method === "PATCH") {
-    headers["Content-Type"] = "application/json";
-    headers["Prefer"] = "return=representation";
-  }
-
   const response = await fetch(
     `${baseUrl}/rest/v1/news_items?${query.toString()}`,
     {
-      method,
-      headers,
-      body: payload ? JSON.stringify(payload) : undefined,
+      method: "PATCH",
+      headers: {
+        apikey: apiKey,
+        Accept: "application/json",
+        "Content-Type": "application/json",
+        Prefer: "return=representation"
+      },
+      body: JSON.stringify(payload),
       signal: AbortSignal.timeout(10000)
     }
   );
 
   if (!response.ok) {
     throw new Error(
-      `Supabase HTTP ${response.status}`
+      `Supabase PATCH HTTP ${response.status}`
     );
   }
 
   const data: unknown = await response.json();
 
   if (!Array.isArray(data)) {
-    throw new Error("Unexpected Supabase response");
+    throw new Error("Unexpected Supabase PATCH response");
   }
 
   return data as T[];
 }
 
+/**
+ * Atomically claim news using the Supabase
+ * daily quota database function.
+ */
+async function claimNews(
+  baseUrl: string,
+  apiKey: string,
+  language: Language
+): Promise<NewsItem[]> {
+  const response = await fetch(
+    `${baseUrl}/rest/v1/rpc/claim_telegram_news`,
+    {
+      method: "POST",
+      headers: {
+        apikey: apiKey,
+        Accept: "application/json",
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        p_language: language,
+        p_requested: MAX_PER_LANGUAGE
+      }),
+      signal: AbortSignal.timeout(10000)
+    }
+  );
+
+  if (!response.ok) {
+    let errorCode = "";
+
+    try {
+      const errorData = await response.json() as {
+        code?: string;
+      };
+
+      errorCode = errorData.code ?? "";
+    } catch {
+      // No structured error body.
+    }
+
+    throw new Error(
+      `Supabase RPC HTTP ${response.status}` +
+      (errorCode ? ` (${errorCode})` : "")
+    );
+  }
+
+  const data: unknown = await response.json();
+
+  if (!Array.isArray(data)) {
+    throw new Error("Unexpected RPC response");
+  }
+
+  return data as NewsItem[];
+}
+
+/**
+ * Format a compact Telegram summary.
+ */
 function formatNews(
   articles: NewsItem[],
   language: Language
@@ -88,9 +149,9 @@ function formatNews(
         )
       : "未知";
 
-    // Keep Telegram messages below the size limit.
     const headline = article.headline.slice(0, 160);
     const source = article.source_name.slice(0, 80);
+
     const link =
       article.source_url.length <= 500
         ? article.source_url
@@ -110,13 +171,19 @@ function formatNews(
     blocks.join("\n\n"),
     "",
     "⚠️ 自动收集，尚未经过真实性审核。",
+    "📊 每日配额：英文9条 / 中文9条",
     "💡 输入 /today 查看更多新闻。"
   ].join("\n");
 }
 
+/**
+ * Main Telegram notification function.
+ */
 export async function pushPendingNews() {
   const supabaseUrl =
-    process.env.SUPABASE_URL?.trim()?.replace(/\/+$/, "");
+    process.env.SUPABASE_URL
+      ?.trim()
+      ?.replace(/\/+$/, "");
 
   const supabaseKey =
     process.env.SUPABASE_SECRET_KEY?.trim();
@@ -138,9 +205,10 @@ export async function pushPendingNews() {
     );
   }
 
-  // Skip pending news collected over 24 hours ago.
+  // STEP 1: Expire pending news older than 24 hours.
   const cutoff = new Date(
-    Date.now() - PENDING_MAX_AGE_HOURS * 60 * 60 * 1000
+    Date.now() -
+    PENDING_MAX_AGE_HOURS * 60 * 60 * 1000
   ).toISOString();
 
   const expireQuery = new URLSearchParams({
@@ -150,92 +218,55 @@ export async function pushPendingNews() {
     collected_at: `lt.${cutoff}`
   });
 
-  const expiredRows = await databaseRows<IdRow>(
+  const expiredRows = await patchNews<IdRow>(
     supabaseUrl,
     supabaseKey,
     expireQuery,
-    "PATCH",
     {
       telegram_push_status: "skipped"
     }
   );
 
   console.log(
-    `[Telegram Notifier] Expired pending news: ${expiredRows.length}`
+    `[Telegram Notifier] Expired: ${expiredRows.length}`
   );
 
   let sentArticles = 0;
   let sentMessages = 0;
   const errors: string[] = [];
 
+  // STEP 2: Process each language separately.
   for (const language of ["en", "zh"] as const) {
     try {
-      // 1. Get news not yet pushed to Telegram.
-     const findQuery = new URLSearchParams({
-  select:
-    "id,headline,source_name,source_url,published_at,collected_at",
-  telegram_push_status: "eq.pending",
-  language: `eq.${language}`,
-  collected_at: `gte.${cutoff}`,
-  order: "collected_at.desc",
-  limit: String(MAX_PER_LANGUAGE)
-});
-
-
-      const candidates = await databaseRows<NewsItem>(
+      // STEP 3: Claim through daily quota RPC.
+      // The database controls daily quota and locking.
+      const claimedArticles = await claimNews(
         supabaseUrl,
         supabaseKey,
-        findQuery
-      );
-
-      if (candidates.length === 0) {
-        console.log(
-          `[Telegram Notifier] No pending ${language} news`
-        );
-        continue;
-      }
-
-      // 2. Claim pending rows before sending.
-      // Conditional updates help prevent concurrent jobs
-      // from claiming the same rows.
-      const ids = candidates.map((item) => item.id);
-
-      const claimQuery = new URLSearchParams({
-        id: `in.(${ids.join(",")})`,
-        telegram_push_status: "eq.pending",
-        select: "id"
-      });
-
-      const claimedRows = await databaseRows<IdRow>(
-        supabaseUrl,
-        supabaseKey,
-        claimQuery,
-        "PATCH",
-        {
-          telegram_push_status: "sending",
-          telegram_push_claimed_at:
-            new Date().toISOString()
-        }
-      );
-
-      const claimedIds = new Set(
-        claimedRows.map((item) => item.id)
-      );
-
-      const claimedArticles = candidates.filter(
-        (item) => claimedIds.has(item.id)
+        language
       );
 
       if (claimedArticles.length === 0) {
+        console.log(
+          `[Telegram Notifier] ${language}: ` +
+          "No claimable news or daily quota reached"
+        );
+
         continue;
       }
 
-      // 3. Send one summary message per language.
+      console.log(
+        `[Telegram Notifier] ${language}: ` +
+        `${claimedArticles.length} articles claimed`
+      );
+
+      // STEP 4: Prepare Telegram message.
       const message = formatNews(
         claimedArticles,
         language
       );
 
+      // STEP 5: Send notification.
       const telegramResponse = await fetch(
         `https://api.telegram.org/bot${telegramToken}/sendMessage`,
         {
@@ -254,10 +285,11 @@ export async function pushPendingNews() {
         }
       );
 
-      const telegramResult = await telegramResponse.json() as {
-        ok: boolean;
-        description?: string;
-      };
+      const telegramResult =
+        await telegramResponse.json() as {
+          ok: boolean;
+          description?: string;
+        };
 
       if (
         !telegramResponse.ok ||
@@ -269,20 +301,21 @@ export async function pushPendingNews() {
         );
       }
 
-      // 4. Record successful delivery in Supabase.
+      // STEP 6: Record successful Telegram delivery.
+      const ids = claimedArticles.map(
+        (article) => article.id
+      );
+
       const finishQuery = new URLSearchParams({
-        id: `in.(${claimedArticles.map(
-          (item) => item.id
-        ).join(",")})`,
+        id: `in.(${ids.join(",")})`,
         telegram_push_status: "eq.sending",
         select: "id"
       });
 
-      const updatedRows = await databaseRows<IdRow>(
+      const updatedRows = await patchNews<IdRow>(
         supabaseUrl,
         supabaseKey,
         finishQuery,
-        "PATCH",
         {
           telegram_push_status: "sent",
           telegram_pushed_at: new Date().toISOString()
@@ -291,7 +324,7 @@ export async function pushPendingNews() {
 
       if (updatedRows.length !== claimedArticles.length) {
         throw new Error(
-          "Telegram delivered, but not all database rows were confirmed"
+          "Telegram delivered but database confirmation incomplete"
         );
       }
 
@@ -302,6 +335,7 @@ export async function pushPendingNews() {
         `[Telegram Notifier] ${language}: ` +
         `${claimedArticles.length} articles sent`
       );
+
     } catch (error) {
       const message =
         error instanceof Error
@@ -316,6 +350,7 @@ export async function pushPendingNews() {
     }
   }
 
+  // STEP 7: Return results to the API.
   return {
     success: errors.length === 0,
     sentArticles,
