@@ -1,0 +1,77 @@
+
+name: Register Telegram Webhook
+
+on:
+  workflow_dispatch:
+    inputs:
+      deployment_url:
+        description: 'Your PRODUCTION Vercel URL'
+        required: true
+        type: string
+
+jobs:
+  register:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set Telegram webhook securely
+        env:
+          BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          WEBHOOK_SECRET: ${{ secrets.TELEGRAM_WEBHOOK_SECRET }}
+          DEPLOYMENT_URL: ${{ inputs.deployment_url }}
+        run: |
+          node --input-type=module <<'NODE'
+          const { BOT_TOKEN, WEBHOOK_SECRET, DEPLOYMENT_URL } = process.env;
+
+          if (!BOT_TOKEN || !WEBHOOK_SECRET || !DEPLOYMENT_URL) {
+            throw new Error('Missing repository secrets or deployment URL');
+          }
+
+          const parsed = new URL(DEPLOYMENT_URL.trim());
+
+          if (parsed.protocol !== 'https:') {
+            throw new Error('Production URL must be HTTPS');
+          }
+
+          const webhookURL = `${parsed.origin}/api/telegram/webhook`;
+
+          const response = await fetch(
+            `https://api.telegram.org/bot${BOT_TOKEN}/setWebhook`,
+            {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                url: webhookURL,
+                secret_token: WEBHOOK_SECRET,
+                allowed_updates: ['message', 'callback_query']
+              })
+            }
+          );
+
+          const payload = await response.json();
+
+          if (!response.ok || !payload.ok) {
+            throw new Error(
+              `Telegram rejected webhook: ${payload.description ?? response.status}`
+            );
+          }
+
+          console.log('Registered Telegram webhook:', webhookURL);
+
+          const check = await fetch(
+            `https://api.telegram.org/bot${BOT_TOKEN}/getWebhookInfo`,
+            { method: 'POST' }
+          );
+
+          const status = await check.json();
+
+          if (!status.ok) {
+            throw new Error('Unable to verify webhook registration');
+          }
+
+          console.log('Webhook URL verified:', status.result.url);
+          console.log('Pending updates:', status.result.pending_update_count);
+
+          if (status.result.last_error_message) {
+            console.log('Last webhook issue:', status.result.last_error_message);
+          }
+          NODE
