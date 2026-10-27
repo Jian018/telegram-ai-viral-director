@@ -56,9 +56,97 @@ bot.command("start", (ctx) =>
   )
 );
 
-bot.command("today", (ctx) =>
-  ctx.reply("📰 今日热点：暂未连接真实新闻来源。下一阶段开放。")
-);
+
+bot.command("today", async (ctx) => {
+  const supabaseUrl = process.env.SUPABASE_URL?.trim();
+  const supabaseKey = process.env.SUPABASE_SECRET_KEY?.trim();
+
+  if (!supabaseUrl || !supabaseKey) {
+    await ctx.reply("❌ Supabase 尚未配置。");
+    return;
+  }
+
+  try {
+    for (const language of ["en", "zh"] as const) {
+      const query = new URLSearchParams({
+        select: "headline,source_name,source_url,published_at",
+        language: `eq.${language}`,
+        published_at: "not.is.null",
+        order: "published_at.desc",
+        limit: "3"
+      });
+
+      const endpoint =
+        `${supabaseUrl.replace(/\/+$/, "")}` +
+        `/rest/v1/news_items?${query.toString()}`;
+
+      const response = await fetch(endpoint, {
+        method: "GET",
+        headers: {
+          apikey: supabaseKey,
+          Accept: "application/json"
+        },
+        signal: AbortSignal.timeout(10000)
+      });
+
+      if (!response.ok) {
+        throw new Error(`Supabase HTTP ${response.status}`);
+      }
+
+      const articles = (await response.json()) as Array<{
+        headline: string;
+        source_name: string;
+        source_url: string;
+        published_at: string;
+      }>;
+
+      const heading =
+        language === "en"
+          ? "🌍 Instagram — 英文科技热点"
+          : "🇨🇳 Douyin — 中文科技热点";
+
+      if (articles.length === 0) {
+        await ctx.reply(`${heading}\n\n暂无新闻。`);
+        continue;
+      }
+
+      const newsText = articles
+        .map((article, index) => {
+          const published = new Date(
+            article.published_at
+          ).toLocaleString("zh-SG", {
+            timeZone: "Asia/Singapore",
+            hour12: false
+          });
+
+          return [
+            `${index + 1}. ${article.headline.slice(0, 200)}`,
+            `📡 来源：${article.source_name}`,
+            `🕒 发布时间：${published} SGT`,
+            `🔗 ${article.source_url}`
+          ].join("\n");
+        })
+        .join("\n\n");
+
+      await ctx.reply(
+        `${heading}\n\n${newsText}` +
+          "\n\n⚠️ 自动采集新闻，尚未核实。",
+        {
+          link_preview_options: {
+            is_disabled: true
+          }
+        }
+      );
+    }
+  } catch (error) {
+    console.error("[Today News] Error:", error);
+
+    await ctx.reply(
+      "❌ 读取最新新闻失败，请检查 Vercel Logs。"
+    );
+  }
+});
+
 bot.command("latest", (ctx) =>
   ctx.reply("🔄 最新新闻抓取：下一阶段开放；目前不会提供虚假热点。")
 );
