@@ -47,7 +47,7 @@ type SendGate = {
  * Optional Date input also allows future
  * deterministic unit testing.
  */
-function checkSendGate(
+export function checkSendGate(
   at: Date = new Date(),
   expectedDay?: string
 ): SendGate {
