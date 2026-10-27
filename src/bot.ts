@@ -89,6 +89,67 @@ bot.callbackQuery(/^menu:(today|ideas|prompts|review|history|settings)$/, async 
   await ctx.reply(names[action] ?? "未知功能", { reply_markup: menu });
 });
 
+
+bot.command("dbcheck", async (ctx) => {
+  const supabaseUrl = process.env.SUPABASE_URL?.trim();
+  const supabaseKey = process.env.SUPABASE_SECRET_KEY?.trim();
+
+  if (!supabaseUrl || !supabaseKey) {
+    await ctx.reply(
+      "❌ Supabase 环境变量尚未配置。"
+    );
+    return;
+  }
+
+  try {
+    const response = await fetch(
+      `${supabaseUrl.replace(/\/+$/, "")}/rest/v1/news_items?select=id&limit=1`,
+      {
+        method: "GET",
+        headers: {
+          apikey: supabaseKey,
+          Accept: "application/json"
+        },
+        signal: AbortSignal.timeout(8000)
+      }
+    );
+
+    if (!response.ok) {
+      console.error(
+        "Supabase check failed:",
+        response.status
+      );
+
+      await ctx.reply(
+        `❌ Supabase 连接失败。\nHTTP Status: ${response.status}`
+      );
+      return;
+    }
+
+    const data: unknown = await response.json();
+
+    if (!Array.isArray(data)) {
+      throw new Error("Unexpected database response");
+    }
+
+    await ctx.reply(
+      "✅ Supabase 数据库连接成功！\n\n" +
+      "📁 Project: AI Viral Director\n" +
+      "📊 Table: news_items\n" +
+      "🔒 Access: Private Server\n\n" +
+      "数据库已经可以读取。"
+    );
+
+  } catch (error) {
+    console.error("Supabase connection error:", error);
+
+    await ctx.reply(
+      "❌ 数据库连接测试出现错误。\n请检查 Vercel Logs。"
+    );
+  }
+});
+
+
 bot.on("message:text", (ctx) =>
   ctx.reply("请输入 /start 打开主菜单，或 /myid 查看自己的 Telegram User ID。")
 );
