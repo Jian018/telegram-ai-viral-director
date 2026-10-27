@@ -1,0 +1,80 @@
+
+name: AI Viral Director - News Hunter
+
+on:
+  # Every 2 hours, at minute 17 (UTC)
+  schedule:
+    - cron: "17 */2 * * *"
+
+  # Allow manual testing from GitHub Actions
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ai-viral-news-hunter
+  cancel-in-progress: false
+
+jobs:
+  collect-news:
+    name: Collect Latest News
+    runs-on: ubuntu-latest
+
+    timeout-minutes: 5
+
+    steps:
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Run News Hunter
+        env:
+          NEWS_COLLECT_SECRET: ${{ secrets.NEWS_COLLECT_SECRET }}
+          NEWS_API_URL: https://aiviral1.vercel.app/api/news/collect
+
+        run: |
+          node --input-type=module <<'NODE'
+          const secret = process.env.NEWS_COLLECT_SECRET;
+          const url = process.env.NEWS_API_URL;
+
+          if (!secret || !url) {
+            throw new Error("Missing News Hunter configuration");
+          }
+
+          console.log("Starting AI Viral Director News Hunter");
+
+          const response = await fetch(url, {
+            method: "POST",
+            headers: {
+              Authorization: `Bearer ${secret}`,
+              Accept: "application/json"
+            },
+            signal: AbortSignal.timeout(90000)
+          });
+
+          const body = await response.text();
+
+          let result;
+
+          try {
+            result = JSON.parse(body);
+          } catch {
+            throw new Error(
+              `Invalid API response: HTTP ${response.status}`
+            );
+          }
+
+          if (!response.ok || result.ok !== true) {
+            console.error("News collection failed");
+            console.error("HTTP status:", response.status);
+            console.error("Errors:", result.errors ?? []);
+            throw new Error("News Hunter execution failed");
+          }
+
+          console.log("News Hunter completed successfully");
+          console.log("Articles scanned:", result.scanned);
+          console.log("New articles saved:", result.saved);
+          console.log("Errors:", result.errors ?? []);
+          NODE
