@@ -1,5 +1,5 @@
 import { webhookCallback } from "grammy";
-import { bot } from "../../src/bot";
+import { bot } from "../../src/bot.js";
 
 // The route is /api/telegram/webhook on Vercel.
 // Important: this must be a webhook, never bot.start() / long polling.
