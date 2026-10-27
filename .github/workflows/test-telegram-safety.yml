@@ -1,0 +1,104 @@
+
+name: Test Telegram Midnight Safety
+
+on:
+  workflow_dispatch:
+
+  push:
+    paths:
+      - "src/telegram-notifier.ts"
+      - ".github/workflows/test-telegram-safety.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  test-midnight:
+    name: Test Singapore Midnight Boundaries
+    runs-on: ubuntu-latest
+
+    timeout-minutes: 3
+
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Run midnight safety tests
+        run: |
+          node --experimental-strip-types --input-type=module <<'NODE'
+          import assert from "node:assert/strict";
+          import { checkSendGate } from "./src/telegram-notifier.ts";
+
+          const cases = [
+            {
+              name: "23:44:59 SGT - allowed",
+              utc: "2026-10-27T15:44:59Z",
+              allowed: true,
+              day: "2026-10-27",
+              time: "23:44"
+            },
+            {
+              name: "23:45:00 SGT - blocked",
+              utc: "2026-10-27T15:45:00Z",
+              allowed: false,
+              day: "2026-10-27",
+              time: "23:45"
+            },
+            {
+              name: "00:14:59 SGT - blocked",
+              utc: "2026-10-27T16:14:59Z",
+              allowed: false,
+              day: "2026-10-28",
+              time: "00:14"
+            },
+            {
+              name: "00:15:00 SGT - allowed",
+              utc: "2026-10-27T16:15:00Z",
+              allowed: true,
+              day: "2026-10-28",
+              time: "00:15"
+            }
+          ];
+
+          for (const item of cases) {
+            const result = checkSendGate(new Date(item.utc));
+
+            assert.equal(result.allowed, item.allowed);
+            assert.equal(result.day, item.day);
+            assert.equal(result.time, item.time);
+
+            console.log(`PASS: ${item.name}`);
+          }
+
+          // A message claimed yesterday must not be
+          // sent after the Singapore date has changed.
+          const crossing = checkSendGate(
+            new Date("2026-10-27T16:15:00Z"),
+            "2026-10-27"
+          );
+
+          assert.equal(crossing.allowed, false);
+          assert.equal(
+            crossing.reason,
+            "Singapore date changed before sending"
+          );
+
+          console.log("PASS: Cross-midnight claim blocked");
+
+          // A claim from the same day should be accepted
+          // while outside the protected time window.
+          const sameDay = checkSendGate(
+            new Date("2026-10-27T15:44:00Z"),
+            "2026-10-27"
+          );
+
+          assert.equal(sameDay.allowed, true);
+
+          console.log("PASS: Same-day claim allowed");
+          console.log("All 6 midnight safety tests passed.");
+          NODE
