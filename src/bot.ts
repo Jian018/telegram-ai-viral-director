@@ -150,6 +150,118 @@ bot.command("dbcheck", async (ctx) => {
 });
 
 
+/**
+ * NEWS HUNTER - PHASE 1
+ * Manually save real news to Supabase.
+ *
+ * Usage:
+ * /savenews Title | https://article-url | Source
+ */
+
+bot.command("savenews", async (ctx) => {
+  const input = ctx.match.trim();
+  const parts = input.split("|").map((x) => x.trim());
+
+  if (parts.length !== 3 || parts.some((x) => !x)) {
+    await ctx.reply(
+      "📰 新闻储存格式：\n\n" +
+      "/savenews 新闻标题 | 新闻网址 | 新闻来源\n\n" +
+      "请提供真实新闻链接。"
+    );
+    return;
+  }
+
+  const [headline, sourceUrl, sourceName] = parts;
+
+  if (headline.length > 300 || sourceName.length > 100) {
+    await ctx.reply("❌ 新闻标题或来源名称过长。");
+    return;
+  }
+
+  let parsedUrl: URL;
+
+  try {
+    parsedUrl = new URL(sourceUrl);
+
+    if (
+      parsedUrl.protocol !== "https:" ||
+      !parsedUrl.hostname.includes(".")
+    ) {
+      throw new Error("Invalid HTTPS URL");
+    }
+  } catch {
+    await ctx.reply("❌ 请输入有效的 HTTPS 新闻链接。");
+    return;
+  }
+
+  const supabaseUrl = process.env.SUPABASE_URL?.trim();
+  const supabaseKey = process.env.SUPABASE_SECRET_KEY?.trim();
+
+  if (!supabaseUrl || !supabaseKey) {
+    await ctx.reply("❌ Supabase 环境变量未配置。");
+    return;
+  }
+
+  try {
+    const response = await fetch(
+      `${supabaseUrl.replace(/\/+$/, "")}/rest/v1/news_items`,
+      {
+        method: "POST",
+        headers: {
+          apikey: supabaseKey,
+          "Content-Type": "application/json",
+          Prefer: "return=minimal"
+        },
+        body: JSON.stringify({
+          headline,
+          source_url: parsedUrl.href,
+          source_name: sourceName,
+          language: /[\u3400-\u9fff]/.test(headline)
+            ? "zh"
+            : "en",
+          verification_status: "pending",
+          status: "new"
+        }),
+        signal: AbortSignal.timeout(8000)
+      }
+    );
+
+    if (response.status === 409) {
+      await ctx.reply(
+        "ℹ️ 这条新闻的网址已存在于数据库，不需要重复保存。"
+      );
+      return;
+    }
+
+    if (!response.ok) {
+      console.error("News insert failed:", response.status);
+      await ctx.reply(
+        `❌ 新闻保存失败。\nHTTP Status: ${response.status}`
+      );
+      return;
+    }
+
+    await ctx.reply(
+      "✅ 新闻保存成功！\n\n" +
+      `📰 标题：${headline}\n` +
+      `📡 来源：${sourceName}\n` +
+      `🔗 链接：${parsedUrl.href}\n\n` +
+      "📁 已储存到 Supabase\n" +
+      "🔍 状态：待核实\n\n" +
+      "下一阶段将加入自动新闻收集和 AI 热点分析。",
+      { link_preview_options: { is_disabled: true } }
+    );
+
+  } catch (error) {
+    console.error("News storage error:", error);
+
+    await ctx.reply(
+      "❌ 新闻保存时出现错误，请检查 Vercel Logs。"
+    );
+  }
+});
+
+
 bot.on("message:text", (ctx) =>
   ctx.reply("请输入 /start 打开主菜单，或 /myid 查看自己的 Telegram User ID。")
 );
