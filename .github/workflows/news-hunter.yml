@@ -1,12 +1,15 @@
 
 name: AI Viral Director - News Hunter
 
+
 on:
-  # Every 2 hours at minute 17 (UTC)
   schedule:
+    # Collect news every 2 hours (UTC)
     - cron: "17 */2 * * *"
 
-  # Allow manual testing
+    # Telegram push: 09:27, 14:27, 19:27 SGT
+    - cron: "27 1,6,11 * * *"
+
   workflow_dispatch:
 
 permissions:
@@ -82,9 +85,12 @@ jobs:
           NODE
 
       # STEP 3: Push pending news to Telegram
+     
       - name: Push News to Telegram
+        if: ${{ github.event_name == 'workflow_dispatch' || github.event.schedule == '27 1,6,11 * * *' }}
         env:
           NEWS_COLLECT_SECRET: ${{ secrets.NEWS_COLLECT_SECRET }}
+
 
         run: |
           node --input-type=module <<'NODE'
