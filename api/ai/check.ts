@@ -105,7 +105,7 @@ export async function POST(
       .trim();
 
     return json({
-      ok: data.status === "completed" && reply === "OK",
+      ok: data.status === "completed" && /^OK[.!]?$/i.test(reply),
       model: data.model,
       reply,
       usage: {
